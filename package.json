@@ -1,0 +1,31 @@
+{
+  "name": "twilio-sip-caller",
+  "version": "1.0.0",
+  "description": "Twilio SIP caller using ES modules",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [
+    "twilio",
+    "sip",
+    "voice",
+    "webrtc"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "twilio": "^4.19.0"
+  },
+  "devDependencies": {
+    "@twilio/voice-sdk": "^2.13.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
