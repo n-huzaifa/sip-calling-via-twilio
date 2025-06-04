@@ -9,16 +9,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 
-// Debug middleware to log all requests
+// Basic request logging
 app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path} - ${new Date().toLocaleTimeString()}`);
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('📋 Body:', req.body);
-  }
+  console.log(`${req.method} ${req.path} - ${new Date().toLocaleTimeString()}`);
   next();
 });
 
@@ -33,49 +30,55 @@ const {
   TWILIO_API_KEY,
   TWILIO_API_SECRET,
   APP_SID,
-  SIP_URI
+  SIP_URI,
+  WEBHOOK_PATH = 'twilio/cmb5v3a6b0001pofthcngifxq/initiate', // Use original path as default
+  CALLER_IDENTITY = 'sipuser' // Configurable caller identity
 } = process.env;
 
 // Validate environment variables
 if (!TWILIO_ACCOUNT_ID || !TWILIO_API_KEY || !TWILIO_API_SECRET || !APP_SID || !SIP_URI) {
-  console.error('Missing required environment variables.');
+  console.error('Missing required environment variables. Please check your .env file.');
+  console.error('Required: TWILIO_ACCOUNT_ID, TWILIO_API_KEY, TWILIO_API_SECRET, APP_SID, SIP_URI');
   process.exit(1);
 }
 
-console.log('SIP URI:', SIP_URI);
+console.log('SIP calling service started');
+console.log(`Webhook endpoint: /webhooks/${WEBHOOK_PATH}`);
 
-// Simple frontend
+// Frontend interface
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Simple SIP Test</title>
+    <title>SIP Calling Interface</title>
     <style>
         body { font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }
         button { padding: 15px 30px; font-size: 16px; margin: 10px; border: none; border-radius: 5px; cursor: pointer; }
         #call { background: #28a745; color: white; }
         #hangup { background: #dc3545; color: white; }
+        #initialize { background: #007bff; color: white; }
         #status { padding: 10px; margin: 10px 0; border-radius: 5px; }
         .ready { background: #d4edda; color: #155724; }
         .error { background: #f8d7da; color: #721c24; }
         .info { background: #d1ecf1; color: #0c5460; }
-        #debug { background: #f8f9fa; padding: 10px; margin: 10px 0; font-family: monospace; font-size: 12px; }
+        .warning { background: #fff3cd; color: #856404; }
+        #logs { background: #f8f9fa; padding: 10px; margin: 10px 0; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; }
     </style>
 </head>
 <body>
-    <h1>Simple SIP Test</h1>
+    <h1>SIP Calling Interface</h1>
     <p>Target: ${SIP_URI}</p>
     
-    <div id="status" class="info">Starting...</div>
-    <div id="debug"></div>
+    <div id="status" class="info">Ready to initialize</div>
+    <div id="logs"></div>
     
-    <button id="call" disabled>Call SIP</button>
-    <button id="hangup" disabled>Hang Up</button>
-    <button id="initialize" style="background: #007bff; color: white; padding: 15px 30px; font-size: 16px; margin: 10px; border: none; border-radius: 5px; cursor: pointer;">Click to Initialize (Required)</button>
+    <button id="initialize">Initialize Voice Client</button>
+    <button id="call" disabled>Start Call</button>
+    <button id="hangup" disabled>End Call</button>
 
     <script type="module">
-        // Load the UMD version and expose it as module
+        // Load Twilio SDK
         await new Promise((resolve, reject) => {
             const script = document.createElement('script');
             script.src = '/twilio-sdk/dist/twilio.min.js';
@@ -84,14 +87,13 @@ app.get('/', (req, res) => {
             document.head.appendChild(script);
         });
         
-        // Now Twilio is available globally
         const { Device } = Twilio;
         
         let device = null;
         let connection = null;
         
         const status = document.getElementById('status');
-        const debug = document.getElementById('debug');
+        const logs = document.getElementById('logs');
         const callBtn = document.getElementById('call');
         const hangupBtn = document.getElementById('hangup');
         const initBtn = document.getElementById('initialize');
@@ -99,141 +101,118 @@ app.get('/', (req, res) => {
         function updateStatus(msg, type = 'info') {
             status.textContent = msg;
             status.className = type;
-            console.log('STATUS:', msg);
         }
         
-        function addDebug(msg) {
-            debug.innerHTML += new Date().toLocaleTimeString() + ': ' + msg + '<br>';
-            console.log('DEBUG:', msg);
+        function addLog(msg) {
+            logs.innerHTML += new Date().toLocaleTimeString() + ': ' + msg + '<br>';
+            logs.scrollTop = logs.scrollHeight;
         }
-        
-        // Step 1: SDK loaded, wait for user gesture
-        addDebug('✅ Twilio SDK imported successfully');
-        updateStatus('Click "Initialize" to start (required for audio)');
         
         initBtn.addEventListener('click', async () => {
             initBtn.disabled = true;
             initBtn.textContent = 'Initializing...';
-            await init();
+            await initializeDevice();
         });
         
-        async function init() {
+        async function initializeDevice() {
             try {
-                addDebug('Step 2: Fetching token...');
-                updateStatus('Step 2: Getting token...');
+                addLog('Requesting access token...');
+                updateStatus('Getting access token...');
                 
                 const response = await fetch('/token');
-                addDebug('Token response status: ' + response.status);
-                
                 if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error('HTTP ' + response.status + ': ' + errorText);
+                    throw new Error('Failed to get access token');
                 }
                 
                 const data = await response.json();
-                addDebug('✅ Token received');
+                addLog('Token received, creating device...');
                 
-                addDebug('Step 3: Creating Twilio Device...');
-                updateStatus('Step 3: Initializing device...');
+                updateStatus('Initializing voice client...');
                 
                 device = new Device(data.token, {
-                    debug: true,
-                    logLevel: 'debug'
+                    logLevel: 'warn' // Reduced logging for production
                 });
                 
-                // Add more event listeners for debugging
                 device.on('ready', () => {
-                    addDebug('✅ Device ready!');
-                    updateStatus('Ready to call!', 'ready');
+                    addLog('Voice client ready');
+                    updateStatus('Ready to make calls', 'ready');
                     callBtn.disabled = false;
                     initBtn.style.display = 'none';
                 });
                 
                 device.on('error', (error) => {
-                    addDebug('❌ Device error: ' + error.message);
-                    addDebug('Error code: ' + (error.code || 'No code'));
-                    addDebug('Error details: ' + JSON.stringify(error, null, 2));
-                    updateStatus('Device error: ' + error.message, 'error');
+                    addLog('Error: ' + error.message);
+                    updateStatus('Error: ' + error.message, 'error');
                 });
                 
-                device.on('offline', () => {
-                    addDebug('📴 Device went offline');
-                });
-                
-                device.on('registering', () => {
-                    addDebug('🔄 Device registering with Twilio...');
-                    updateStatus('Registering with Twilio...');
-                });
-                
+                // Registration events (not required for outbound calls)
                 device.on('registered', () => {
-                    addDebug('✅ Device registered successfully!');
-                    updateStatus('Device registered!', 'ready');
+                    addLog('Device registered (enables incoming calls)');
                 });
                 
                 device.on('unregistered', () => {
-                    addDebug('❌ Device unregistered - check TwiML App Voice URL!');
-                    updateStatus('Failed to register - check TwiML App config', 'error');
-                });
-                
-                device.on('incoming', (call) => {
-                    addDebug('📞 Incoming call');
+                    addLog('Device not registered (incoming calls disabled, outbound calls still work)');
                 });
                 
                 device.on('connect', (conn) => {
-                    addDebug('✅ Call connected');
-                    updateStatus('Connected!', 'ready');
+                    addLog('Call connected');
+                    updateStatus('Call in progress', 'ready');
                     connection = conn;
                     callBtn.disabled = true;
                     hangupBtn.disabled = false;
                 });
                 
                 device.on('disconnect', () => {
-                    addDebug('Call disconnected');
+                    addLog('Call ended');
                     updateStatus('Call ended', 'info');
                     connection = null;
                     callBtn.disabled = false;
                     hangupBtn.disabled = true;
                 });
                 
-                // Add more detailed event debugging
-                device.on('tokenWillExpire', () => {
-                    addDebug('⚠️ Token will expire soon');
-                });
-                
-                device.on('destroy', () => {
-                    addDebug('🔥 Device destroyed');
-                });
-                
-                addDebug('Device created, waiting for ready event...');
-                
-                // Try to force call anyway after a few seconds (bypass registration check)
+                // Enable calling after a short delay (registration not required for outbound)
                 setTimeout(() => {
-                    if (!device.isReady) {
-                        addDebug('💡 Trying to enable call anyway...');
-                        callBtn.disabled = false;
-                        callBtn.style.background = '#ffc107';
-                        callBtn.textContent = 'Try Call Anyway';
-                        updateStatus('Registration failed, but you can try calling', 'warning');
-                    }
-                }, 5000);
+                    if (!callBtn.disabled) return; // Already enabled by 'ready' event
+                    
+                    addLog('Enabling outbound calling (registration not required)');
+                    callBtn.disabled = false;
+                    updateStatus('Ready to make outbound calls', 'ready');
+                    initBtn.style.display = 'none';
+                }, 2000);
                 
             } catch (error) {
-                addDebug('❌ Initialization failed: ' + error.message);
-                updateStatus('Failed: ' + error.message, 'error');
-                console.error('Full error:', error);
+                addLog('Initialization failed: ' + error.message);
+                updateStatus('Initialization failed: ' + error.message, 'error');
             }
         }
         
         callBtn.addEventListener('click', () => {
-            addDebug('Calling device.connect()...');
-            updateStatus('Calling...');
-            device.connect();
+            addLog('Initiating call...');
+            updateStatus('Connecting...');
+            
+            // Disable call button immediately
+            callBtn.disabled = true;
+            hangupBtn.disabled = false;
+            
+            try {
+                connection = device.connect();
+            } catch (error) {
+                addLog('Call failed: ' + error.message);
+                updateStatus('Call failed: ' + error.message, 'error');
+                // Re-enable call button on error
+                callBtn.disabled = false;
+                hangupBtn.disabled = true;
+            }
         });
         
         hangupBtn.addEventListener('click', () => {
             if (connection) {
-                addDebug('Disconnecting...');
+                addLog('Ending call...');
                 connection.disconnect();
+            } else if (device) {
+                // Fallback: disconnect all connections
+                addLog('Ending call (fallback)...');
+                device.disconnectAll();
             }
         });
     </script>
@@ -244,74 +223,57 @@ app.get('/', (req, res) => {
 
 // Token endpoint
 app.get('/token', (req, res) => {
-  console.log('Token request received');
-  
   try {
-    const identity = 'sipuser';
-    
-    console.log('Creating token with:');
-    console.log('- Account SID:', TWILIO_ACCOUNT_ID);
-    console.log('- API Key:', TWILIO_API_KEY);
-    console.log('- App SID:', APP_SID);
-    console.log('- Identity:', identity);
-    
     const voiceGrant = new VoiceGrant({
       outgoingApplicationSid: APP_SID,
       incomingAllow: false
     });
 
-    const token = new AccessToken(TWILIO_ACCOUNT_ID, TWILIO_API_KEY, TWILIO_API_SECRET, { identity });
+    const token = new AccessToken(TWILIO_ACCOUNT_ID, TWILIO_API_KEY, TWILIO_API_SECRET, { 
+      identity: CALLER_IDENTITY 
+    });
     token.addGrant(voiceGrant);
     
     const jwt = token.toJwt();
-    console.log('Token generated successfully');
-    console.log('Token length:', jwt.length);
+    console.log('Access token generated');
     
     res.json({ token: jwt });
     
   } catch (error) {
-    console.error('Token generation error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Token generation error:', error.message);
+    res.status(500).json({ error: 'Failed to generate token' });
   }
 });
 
-// TwiML endpoint - this is where Twilio calls when you click "Call"
-app.post('/webhooks/twilio/cmb5v3a6b0001pofthcngifxq/initiate', (req, res) => {
-  console.log('🎯 Voice webhook called - SUCCESS!');
-  console.log('📋 Request body:', req.body);
+// TwiML webhook endpoint - handles outbound call routing
+app.post(`/webhooks/${WEBHOOK_PATH}`, (req, res) => {
+  console.log('Voice webhook called');
   
   const twiml = new twilio.twiml.VoiceResponse();
   
-  // Create dial instruction with SIP-compatible caller ID
+  // Route call to SIP endpoint
   const dial = twiml.dial({
-    callerId: 'sipuser'  // Simple alphanumeric caller ID for SIP
+    callerId: CALLER_IDENTITY
   });
   
-  // Add SIP endpoint
   dial.sip(SIP_URI);
-  
-  console.log('📤 TwiML response:', twiml.toString());
   
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// Add status callback endpoint to avoid 404s
-app.post('/webhooks/twilio/cmb5v3a6b0001pofthcngifxq/status', (req, res) => {
-  console.log('📊 Call status callback:', req.body);
+// Status callback endpoint
+app.post(`/webhooks/${WEBHOOK_PATH}/status`, (req, res) => {
+  console.log('Call status update:', req.body.CallStatus);
   res.status(200).send('OK');
 });
 
-// Catch-all for debugging what paths Twilio is trying to hit
-app.all('*', (req, res) => {
-  console.log(`❓ Unknown route attempted: ${req.method} ${req.path}`);
-  console.log('📋 Headers:', req.headers);
-  console.log('📋 Body:', req.body);
-  res.status(404).send('Route not found - check console for debugging');
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-  console.log('TwiML App Voice URL is already configured correctly!');
-  console.log('🔍 Debug mode: All requests will be logged');
+  console.log(`Server running on port ${port}`);
+  console.log(`Configure your TwiML App Voice URL to: http://your-domain/webhooks/${WEBHOOK_PATH}`);
 });
